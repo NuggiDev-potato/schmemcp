@@ -125,13 +125,32 @@ Draws a schematic wire between two points.
 - `x1, y1`: Start point coordinates (pixels)
 - `x2, y2`: End point coordinates (pixels)
 
-**Internal API call:**
+**Mechanism (verified working):** Wires are NOT created via `api("createShape", {shapeType: "wire"})` —
+that routes to the editor's interactive `drawShape` state machine and only leaves a `false` stub
+in the top-level `wire` container (nothing rendered). Real schematic wires live in the sheet/frame
+lib's `polyline` container: `src.schlib[<sheetLibGid>].polyline[<newGid>]`, where `<sheetLibGid>`
+is `src.itemOrder[0]` (e.g. `frame_lib_1`). Inject the wire object there and call `applySource`.
+
+**Internal implementation (main.js `handleAddWire`):**
 ```javascript
-api("createShape", {
-  shapeType: "wire",
-  pointArr: [{x: x1, y: y1}, {x: x2, y: y2}]
-});
+var src = api('getSource', { type: 'json', compress: false });
+var sheetGid = src.itemOrder[0]; // frame/sheet lib
+var gid = nextGid(src);           // max existing gge N + 1
+src.schlib[sheetGid].polyline[gid] = {
+  gId: gid,
+  strokeColor: '#880000',
+  strokeWidth: '1',
+  strokeStyle: 0,
+  fillColor: 'none',
+  locked: '0',
+  pointArr: [{ x: x1, y: y1 }, { x: x2, y: y2 }]
+};
+api('applySource', { source: src });
 ```
+
+The editor normalizes and repaints the frame's `polyline` container to `c_etype` polylines on the
+canvas; verified rendered in the live DOM (`<polyline points="400 -200 600 -200" stroke="#880000">`).
+The top-level `wire` container and `itemOrder` are NOT used for wires.
 
 ### 5. `update_net_name(gid, net_name)`
 

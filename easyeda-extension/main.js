@@ -170,6 +170,24 @@ function handleSearchLcsc(msg) {
     });
 }
 
+function nextGid(src) {
+  var max = 0, match;
+  var scan = function(obj) {
+    if (!obj || typeof obj !== 'object') return obj === undefined;
+    if (Array.isArray(obj)) { for (var i = 0; i < obj.length; i++) scan(obj[i]); return obj === undefined; }
+    for (var k in obj) {
+      if (typeof k === 'string' && (match = /^gge(\d+)$/.exec(k))) {
+        var n = parseInt(match[1], 10);
+        if (n > max) max = n;
+      }
+      scan(obj[k]);
+    }
+    return obj === undefined;
+  };
+  scan(src);
+  return 'gge' + (max + 1);
+}
+
 function handleAddWire(msg) {
   var args = msg.args || {};
   var x1 = args.x1, y1 = args.y1, x2 = args.x2, y2 = args.y2;
@@ -179,16 +197,40 @@ function handleAddWire(msg) {
     return;
   }
   try {
-    var ret = api('createShape', {
-      shapeType: 'wire',
-      points: [{ x: x1, y: y1 }, { x: x2, y: y2 }],
-      width: 1,
-      color: '#880000'
-    });
-    log('ADD_WIRE createShape ret=' + safeStr(ret));
-    sendResponse(msg.req_id, { placed: true, ret: ret });
+    var src = api('getSource', { type: 'json', compress: false });
+
+    var sheetGid = null;
+    if (src.itemOrder && src.itemOrder.length && src.schlib && src.schlib[src.itemOrder[0]]) {
+      sheetGid = src.itemOrder[0];
+    } else if (src.schlib) {
+      for (var key in src.schlib) {
+        if (src.schlib[key].polyline) { sheetGid = key; break; }
+      }
+    }
+    if (!sheetGid) {
+      sendError(msg.req_id, 'no sheet/frame lib found in source');
+      return;
+    }
+    log('ADD_WIRE sheet lib=' + sheetGid);
+
+    var gid = nextGid(src);
+    src.schlib[sheetGid].polyline = src.schlib[sheetGid].polyline || {};
+    src.schlib[sheetGid].polyline[gid] = {
+      gId: gid,
+      strokeColor: '#880000',
+      strokeWidth: '1',
+      strokeStyle: 0,
+      fillColor: 'none',
+      locked: '0',
+      pointArr: [{ x: x1, y: y1 }, { x: x2, y: y2 }]
+    };
+
+    api('applySource', { source: src });
+    log('ADD_WIRE placed gId=' + gid);
+    sendResponse(msg.req_id, { placed: true, id: gid, gId: gid, sheet: sheetGid });
   } catch (e) {
-    sendError(msg.req_id, 'createShape wire threw: ' + e.message);
+    log('ADD_WIRE error: ' + e.stack);
+    sendError(msg.req_id, 'add wire threw: ' + e.message);
   }
 }
 
