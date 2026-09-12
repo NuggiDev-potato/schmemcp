@@ -136,6 +136,80 @@ function placeLibShape(reqId, code, uuid, datastrid, x, y) {
   }, 500);
 }
 
+function handleGetSource(msg) {
+  var args = msg.args || {};
+  var sourceType = args.type || 'json';
+  log('GET_SOURCE type=' + sourceType);
+  try {
+    var src = api('getSource', { type: sourceType });
+    sendResponse(msg.req_id, src);
+  } catch (e) {
+    sendError(msg.req_id, 'getSource threw: ' + e.message);
+  }
+}
+
+function handleSearchLcsc(msg) {
+  var args = msg.args || {};
+  var query = args.query;
+  log('SEARCH_LCSC query=' + query);
+  if (!query) { sendError(msg.req_id, 'missing query'); return; }
+
+  fetch('/api/components/search', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ wd: query })
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(j) {
+      log('SEARCH_LCSC result keys: ' + Object.keys(j).join(','));
+      sendResponse(msg.req_id, j.result || j);
+    })
+    .catch(function(err) {
+      sendError(msg.req_id, 'search fetch failed: ' + (err && err.message || err));
+    });
+}
+
+function handleAddWire(msg) {
+  var args = msg.args || {};
+  var x1 = args.x1, y1 = args.y1, x2 = args.x2, y2 = args.y2;
+  log('ADD_WIRE ' + x1 + ',' + y1 + ' -> ' + x2 + ',' + y2);
+  if (x1 === undefined || y1 === undefined || x2 === undefined || y2 === undefined) {
+    sendError(msg.req_id, 'missing x1/y1/x2/y2');
+    return;
+  }
+  try {
+    var ret = api('createShape', {
+      shapeType: 'wire',
+      points: [{ x: x1, y: y1 }, { x: x2, y: y2 }],
+      width: 1,
+      color: '#880000'
+    });
+    log('ADD_WIRE createShape ret=' + safeStr(ret));
+    sendResponse(msg.req_id, { placed: true, ret: ret });
+  } catch (e) {
+    sendError(msg.req_id, 'createShape wire threw: ' + e.message);
+  }
+}
+
+function handleUpdateNetName(msg) {
+  var args = msg.args || {};
+  var gid = args.gid;
+  var netName = args.net_name;
+  log('UPDATE_NET_NAME gid=' + gid + ' net=' + netName);
+  if (!gid || !netName) { sendError(msg.req_id, 'missing gid or net_name'); return; }
+  try {
+    var ret = api('updateShape', {
+      shapeType: 'PAD',
+      jsonCache: { gId: gid, net: netName }
+    });
+    log('UPDATE_NET_NAME updateShape ret=' + safeStr(ret));
+    sendResponse(msg.req_id, { updated: true, gid: gid, net: netName, ret: ret });
+  } catch (e) {
+    sendError(msg.req_id, 'updateShape threw: ' + e.message);
+  }
+}
+
 function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
@@ -162,6 +236,14 @@ function connect() {
       handlePlaceLcsc(msg);
     } else if (msg.action === 'EXEC_JS' && msg.req_id) {
       handleExecJs(msg);
+    } else if (msg.action === 'GET_SOURCE' && msg.req_id) {
+      handleGetSource(msg);
+    } else if (msg.action === 'SEARCH_LCSC' && msg.req_id) {
+      handleSearchLcsc(msg);
+    } else if (msg.action === 'ADD_WIRE' && msg.req_id) {
+      handleAddWire(msg);
+    } else if (msg.action === 'UPDATE_NET_NAME' && msg.req_id) {
+      handleUpdateNetName(msg);
     }
   };
 

@@ -129,6 +129,59 @@ async def eval_browser_js(code: str) -> str:
     return json.dumps({"status": "success", "data": result})
 
 
+@mcp.tool()
+async def get_canvas_source(type: str = "json") -> str:
+    """Retrieve the full active EasyEDA document.
+
+    Args:
+        type: Document format - "json" (default), "compress", or "svg".
+    """
+    result = await _send_to_browser("GET_SOURCE", {"type": type})
+    return json.dumps({"status": "success", "data": result})
+
+
+@mcp.tool()
+async def search_lcsc_component(query: str) -> str:
+    """Search the LCSC/EasyEDA parts database by keyword or C-number.
+
+    Args:
+        query: Search term (keyword like "NE555" or C-number like "C123302").
+    """
+    result = await _send_to_browser("SEARCH_LCSC", {"query": query})
+    return json.dumps({"status": "success", "data": result})
+
+
+@mcp.tool()
+async def add_wire(x1: float, y1: float, x2: float, y2: float) -> str:
+    """Draw a schematic wire between two points.
+
+    Args:
+        x1: Start X-coordinate in EasyEDA internal pixels (1 px = 10 mil = 0.254 mm).
+        y1: Start Y-coordinate.
+        x2: End X-coordinate.
+        y2: End Y-coordinate.
+    """
+    result = await _send_to_browser("ADD_WIRE", {
+        "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+    })
+    return json.dumps({"status": "success", "data": result})
+
+
+@mcp.tool()
+async def update_net_name(gid: str, net_name: str) -> str:
+    """Update the net assignment of a pad or track element.
+
+    Args:
+        gid: The gId of the pad/track element (e.g. "gge233_1").
+        net_name: New net name to assign (e.g. "VCC", "GND", "3V3").
+    """
+    result = await _send_to_browser("UPDATE_NET_NAME", {
+        "gid": gid,
+        "net_name": net_name,
+    })
+    return json.dumps({"status": "success", "data": result})
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
