@@ -62,6 +62,8 @@ function handleExecJs(msg) {
   }
 }
 
+var LCSC_LOOKUP_URL = 'https://easyeda.com/api/products/CODE/components?version=6.4.19.5';
+
 function handlePlaceLcsc(msg) {
   var args = msg.args || {};
   var code = args.lcscPartNumber;
@@ -69,43 +71,69 @@ function handlePlaceLcsc(msg) {
   var posY = args.y;
   log('PLACE_LCSC: ' + safeStr(args));
 
-  if (!code) {
-    sendError(msg.req_id, 'lcscPartNumber is required');
+  if (!code) { sendError(msg.req_id, 'missing lcscPartNumber'); return; }
+
+  var url = LCSC_LOOKUP_URL.replace('CODE', encodeURIComponent(code));
+  fetch(url)
+    .then(function(r) { return r.json(); })
+    .then(function(j) {
+      var res = j && j.result;
+      if (!j || j.success !== true || !res) {
+        sendError(msg.req_id, 'LCSC lookup failed for ' + code + ': ' + safeStr(j).substring(0, 300));
+        return;
+      }
+      if (!res.uuid || !res.datastrid) {
+        sendError(msg.req_id, 'LCSC lookup returned no uuid/datastrid for ' + code + ': ' + safeStr(res).substring(0, 300));
+        return;
+      }
+      log('LCSC lookup OK for ' + code + ' uuid=' + res.uuid + ' datastrid=' + res.datastrid);
+      placeLibShape(msg.req_id, code, res.uuid, res.datastrid, posX, posY);
+    })
+    .catch(function(err) {
+      sendError(msg.req_id, 'LCSC fetch failed: ' + (err && err.message || err));
+    });
+}
+
+function placeLibShape(reqId, code, uuid, datastrid, x, y) {
+  var before, beforeKeys = [];
+  try { before = api('getSource', { type: 'json' }); } catch (e) { before = null; }
+  if (before && before.schlib) beforeKeys = Object.keys(before.schlib);
+
+  var ret;
+  try {
+    ret = api('createShape', {
+      shapeType: 'schlib',
+      uuid: uuid,
+      datastrid: datastrid,
+      from: 'system',
+      title: code,
+      x: x,
+      y: y
+    });
+  } catch (e) {
+    sendError(reqId, 'createShape threw: ' + e.message);
     return;
   }
+  log('createShape issued for ' + code + ', ret=' + safeStr(ret) + ', waiting for shape...');
 
-  log('Step 1: fetching component uuid for ' + code);
-  fetch(location.origin + '/api/products/' + code + '/components?version=6.4.19.5', { credentials: 'include' })
-    .then(function(resp) {
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      return resp.json();
-    })
-    .then(function(body) {
-      if (!body || !body.success || !body.result || !body.result.uuid) {
-        throw new Error('Component not found: ' + code);
-      }
-      var uuid = body.result.uuid;
-      log('Step 2: uuid=' + uuid + ' title=' + (body.result.title || ''));
-      try {
-        api('createShape', {
-          shapeType: 'schlib',
-          uuid: uuid,
-          x: posX,
-          y: posY
-        });
-        log('Step 3: createShape OK for ' + code);
-        setTimeout(function() {
-          sendResponse(msg.req_id, { placed: true, code: code, uuid: uuid });
-        }, 800);
-      } catch (e2) {
-        log('Step 3: createShape FAILED: ' + e2.message);
-        sendError(msg.req_id, 'createShape failed: ' + e2.message);
-      }
-    })
-    .catch(function(e) {
-      log('STEP 1: fetch failed: ' + e.message);
-      sendError(msg.req_id, e.message);
-    });
+  var attempts = 0;
+  var timer = setInterval(function() {
+    attempts++;
+    var after, afterKeys = [];
+    try { after = api('getSource', { type: 'json' }); } catch (e) { after = null; }
+    if (after && after.schlib) afterKeys = Object.keys(after.schlib);
+    var added = afterKeys.filter(function(k) { return beforeKeys.indexOf(k) === -1; });
+    if (added.length) {
+      clearInterval(timer);
+      log('createShape placed gId=' + added[0]);
+      sendResponse(reqId, { placed: true, id: added[0], gId: added[0] });
+      return;
+    }
+    if (attempts >= 20) {
+      clearInterval(timer);
+      sendError(reqId, 'createShape issued but no new shape appeared within 10s');
+    }
+  }, 500);
 }
 
 function connect() {
