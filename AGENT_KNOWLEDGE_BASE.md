@@ -78,25 +78,61 @@ Retrieves the full active EasyEDA document schema.
 }
 ```
 
-### 2. `search_lcsc_component(query)`
+### 2. Component Search Tools (Python-native)
 
-Searches the LCSC/JLCPCB parts database. Does NOT require browser connection.
+All component search runs **entirely in Python** (`requests` → EasyEDA/LCSC HTTP APIs); NO
+browser/WebSocket connection is required. Whatever you can describe in free-form features,
+the tools translate into a ranked shortlist.
 
-**Parameters:**
-- `query`: Search text, part number, or C-number (e.g., `"NE555"`, `"C12345"`)
+Available tools:
 
-**Returns:** JSON array of component objects:
+| Tool | Use for |
+|------|---------|
+| `search_lcsc_component(query)` | Generic keyword/C-number search |
+| `search_component(features)` | Any component described by free-form features |
+| `search_capacitor(features)` | Capacitors (auto-excludes Y5V/Z5U) |
+| `search_resistor(features)` | Resistors |
+| `search_diode(features)` | Diodes (incl. schottky, zener) |
+| `search_inductor(features)` | Inductors (power/SMD) |
+
+**Parameters (`features`):** a **list of feature strings** describing specs you care about,
+e.g. `["boost converter", "600 kHz"]`, `["I2C", "level shifter"]`, `["100nF", "0603", "X7R"]`,
+`["10k", "0402", "1%"]`, `["SS34", "schottky", "3A", "40V"]`. Every feature string must show up
+in the returned part's title/description/tags/value — parts that don't match ALL features are
+discarded (this removes "stray" unrelated results).
+
+**Result object:**
 ```json
-[{
-  "lcsc_id": "C7593",
-  "mfr_part": "NE555DR",
-  "title": "Timer IC",
-  "package": "SOIC-8",
-  "stock": 322212,
-  "price": 0.091,
-  "description": "..."
-}]
+{
+  "query": "boost converter 600kHz",
+  "attempted": true,
+  "max_price": 5.0,
+  "candidates": [{
+    "lcsc_id": "C123302",
+    "title": "TPS61021A ...",
+    "value": "3.3V",
+    "package": "SOT-23-5",
+    "manufacturer": "TI",
+    "mfr_part": "TPS61021ADSGR",
+    "stock": 12345,
+    "price": 0.412,
+    "over_budget": false,
+    "jlc_class": "Extended Part"
+  }]
+}
 ```
+
+The tool already:
+- **Remove unavailable parts** (stock = 0 filtered out).
+- **Drop stray/unrelated results** that do not actually match the search type.
+- **Sort by price ascending** and return the **top 5** (`max_results` still honored).
+
+**Budget rule:** `over_budget: true` means the candidate is above the $5 budget. When the
+best match exceeds $5, ASK THE USER FOR THEIR OPINION before placing it.
+
+**Stop rule:** if a search returns no candidates and a retry with a different/better query
+also fails, STOP — do not keep guessing queries. Refine by asking the user for more specs
+or pick a different component type.
 
 ### 3. `place_component(title, x, y)`
 
@@ -354,19 +390,47 @@ Messages between Python server and browser extension use JSON-RPC style frames:
 
 ---
 
-## LCSC Component Data Fields
+## Component Selection Guidance
 
-When using `search_lcsc_component()`, results contain:
+Rules an agent MUST follow when choosing parts:
 
-| Field | Description |
-|-------|-------------|
-| `lcsc_id` | LCSC code (e.g., "C7593") |
-| `mfr_part` | Manufacturer part number |
-| `title` | Component title/description |
-| `package` | Footprint/package (e.g., "SOIC-8") |
-| `stock` | Current stock quantity |
-| `price` | Unit price (USD) |
-| `description` | Full description |
+1. **More than one candidate with equal/close price+stock → ASK the user** which one they
+   prefer before finalizing. Do not silently pick between equal ties.
+2. **Over-budget pick (> $5)** → surface the price to the user and ask if it is acceptable.
+3. **Cannot find a match** → after **2 failed search calls** (with different/good queries),
+   STOP. Ask the user for clarification rather than guessing further.
+4. Never place a part that is out of stock (the tools already filter these, but double-check
+   the `stock` field).
+5. Prefer parts with higher stock when candidates are otherwise equivalent — fewer supply risks.
+
+### Dielectrics (SMD ceramic capacitors)
+
+- **Y5V and Z5U — NOT recommended.** They lose most of their capacitance under DC bias and with
+  temperature (up to −80%/+30% from −30°C to +85°C, and up to −50% at rated DC voltage), which
+  kills decoupling/filtering behavior. `search_capacitor()` automatically excludes them.
+- **Preferred dielectrics:** C0G/NP0 (stable, low loss, for precision/timing), X7R, X5R, X6S
+  (good density + stability trade-off for decoupling).
+- If in doubt for power/decoupling: X7R/X5R.
+
+### Footprint pros/cons
+
+| Package | Good | Bad |
+|---------|------|-----|
+| 0402 | tiny, high density, cheap | hard to hand-solder, low power/voltage rating |
+| 0603 | good density + easy to handle | none major — default choice for passives |
+| 0805 | easier to hand-solder, more power | larger, fewer fit on a board |
+| 1206 | high power/voltage, easiest hand-solder | large footprint |
+| SOT-23-3/5/6 | tiny, common for small ICs/transistors | harder to hand-solder, low power |
+| SOIC-8 (150mil) | easy to solder, standard | larger than QFN/SOIC-8EP for power |
+| SOIC-8-EP / SOP-8-PP | better thermal payout for power ICs | exposed pad needs correct pad in layout |
+| QFN-xx | small, good thermal/electrical | hard to hand-solder, pad under package |
+| SOT-223 | higher power than SOT-23, easy solder | bulkier |
+| DPAK/TO-252 | good thermal path for regulators/diodes | big for small signals |
+| Through-hole (DIP) | breadboard/prototype friendly, easy solder | large, not for production density |
+| 1210 / 2010 / 2512 | power resistors/caps, high current | large |
+
+For a given value, prefer the smallest package whose power/voltage rating fits — and prefer the
+one with both good stock and low price (the search tools already rank this way).
 
 ---
 

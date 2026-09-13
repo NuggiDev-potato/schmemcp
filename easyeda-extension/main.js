@@ -287,6 +287,54 @@ function handleUpdateNetName(msg) {
   }
 }
 
+function handleDelete(msg) {
+  var gids = msg.args && msg.args.gids;
+  log('DELETE gids=' + JSON.stringify(gids));
+  if (!gids || !gids.length) { sendError(msg.req_id, 'missing gids'); return; }
+  try {
+    var ret = api('delete', { ids: gids });
+    log('DELETE ret=' + safeStr(ret));
+    sendResponse(msg.req_id, { deleted: gids, ret: ret });
+  } catch (e) {
+    sendError(msg.req_id, 'delete threw: ' + e.message);
+  }
+}
+
+function handleMoveObjs(msg) {
+  var args = msg.args || {};
+  var gids = args.gids || [];
+  var addX = args.addX || 0;
+  var addY = args.addY || 0;
+  log('MOVE_OBJS gids=' + JSON.stringify(gids) + ' addX=' + addX + ' addY=' + addY);
+  if (!gids.length) { sendError(msg.req_id, 'missing gids'); return; }
+  var objs = gids.map(function(g) { return { gId: g }; });
+  try {
+    var ret = api('moveObjs', { objs: objs, addX: addX, addY: addY });
+    log('MOVE_OBJS ret=' + safeStr(ret));
+    sendResponse(msg.req_id, { moved: gids, addX: addX, addY: addY, ret: ret });
+  } catch (e) {
+    sendError(msg.req_id, 'moveObjs threw: ' + e.message);
+  }
+}
+
+function handleMoveObjsTo(msg) {
+  var args = msg.args || {};
+  var gids = args.gids || [];
+  var posX = args.x;
+  var posY = args.y;
+  log('MOVE_OBJS_TO gids=' + JSON.stringify(gids) + ' x=' + posX + ' y=' + posY);
+  if (!gids.length) { sendError(msg.req_id, 'missing gids'); return; }
+  if (posX === undefined || posY === undefined) { sendError(msg.req_id, 'missing x or y'); return; }
+  var objs = gids.map(function(g) { return { gId: g }; });
+  try {
+    var ret = api('moveObjsTo', { objs: objs, x: posX, y: posY });
+    log('MOVE_OBJS_TO ret=' + safeStr(ret));
+    sendResponse(msg.req_id, { moved: gids, x: posX, y: posY, ret: ret });
+  } catch (e) {
+    sendError(msg.req_id, 'moveObjsTo threw: ' + e.message);
+  }
+}
+
 function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
@@ -323,6 +371,12 @@ function connect() {
       handleAddLine(msg);
     } else if (msg.action === 'UPDATE_NET_NAME' && msg.req_id) {
       handleUpdateNetName(msg);
+    } else if (msg.action === 'DELETE' && msg.req_id) {
+      handleDelete(msg);
+    } else if (msg.action === 'MOVE_OBJS' && msg.req_id) {
+      handleMoveObjs(msg);
+    } else if (msg.action === 'MOVE_OBJS_TO' && msg.req_id) {
+      handleMoveObjsTo(msg);
     }
   };
 
