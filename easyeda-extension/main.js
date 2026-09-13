@@ -204,12 +204,12 @@ function handleAddWire(msg) {
       shapeType: 'wire',
       jsonCache: {
         gId: gid,
-        strokeColor: '#880000',
-        strokeWidth: '1',
-        strokeStyle: 0,
-        fillColor: 'none',
-        locked: '0',
-        pointArr: [{ x: x1, y: y1 }, { x: x2, y: y2 }]
+        pointArr: [
+          { x: x1, y: y1 },
+          { x: x2, y: y2 }
+        ],
+        strokeColor: '#0000FF',
+        strokeWidth: 2
       }
     });
     log('ADD_WIRE createShape issued gId=' + gid + ' ret=' + safeStr(ret));
@@ -224,6 +224,48 @@ function handleAddWire(msg) {
   } catch (e) {
     log('ADD_WIRE error: ' + e.stack);
     sendError(msg.req_id, 'add wire threw: ' + e.message);
+  }
+}
+
+function handleAddLine(msg) {
+  var args = msg.args || {};
+  var x1 = args.x1, y1 = args.y1, x2 = args.x2, y2 = args.y2;
+  var strokeColor = args.strokeColor || '#00FF00';
+  var strokeWidth = args.strokeWidth || 1;
+  log('ADD_LINE ' + x1 + ',' + y1 + ' -> ' + x2 + ',' + y2);
+  if (x1 === undefined || y1 === undefined || x2 === undefined || y2 === undefined) {
+    sendError(msg.req_id, 'missing x1/y1/x2/y2');
+    return;
+  }
+  try {
+    var src = api('getSource', { type: 'json', compress: false });
+    var gid = nextGid(src);
+
+    var ret = api('createShape', {
+      shapeType: 'line',
+      jsonCache: {
+        gId: gid,
+        x1: x1,
+        y1: y1,
+        x2: x2,
+        y2: y2,
+        strokeColor: strokeColor,
+        strokeWidth: strokeWidth,
+        strokeStyle: 'solid'
+      }
+    });
+    log('ADD_LINE createShape issued gId=' + gid + ' ret=' + safeStr(ret));
+
+    var after = api('getSource', { type: 'json', compress: false });
+    var lineObj = after.line && after.line[gid];
+    if (lineObj) {
+      sendResponse(msg.req_id, { placed: true, id: gid, gId: gid });
+    } else {
+      sendResponse(msg.req_id, { placed: true, id: gid, gId: gid, note: 'line issued but not found in line container' });
+    }
+  } catch (e) {
+    log('ADD_LINE error: ' + e.stack);
+    sendError(msg.req_id, 'add line threw: ' + e.message);
   }
 }
 
@@ -277,6 +319,8 @@ function connect() {
       handleSearchLcsc(msg);
     } else if (msg.action === 'ADD_WIRE' && msg.req_id) {
       handleAddWire(msg);
+    } else if (msg.action === 'ADD_LINE' && msg.req_id) {
+      handleAddLine(msg);
     } else if (msg.action === 'UPDATE_NET_NAME' && msg.req_id) {
       handleUpdateNetName(msg);
     }

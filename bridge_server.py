@@ -168,6 +168,27 @@ async def add_wire(x1: float, y1: float, x2: float, y2: float) -> str:
 
 
 @mcp.tool()
+async def add_line(x1: float, y1: float, x2: float, y2: float,
+                   stroke_color: str = "#00FF00", stroke_width: float = 1) -> str:
+    """Draw a real line object on the EasyEDA schematic canvas.
+
+    Args:
+        x1: Start X-coordinate in EasyEDA internal pixels (1 px = 10 mil = 0.254 mm).
+        y1: Start Y-coordinate.
+        x2: End X-coordinate.
+        y2: End Y-coordinate.
+        stroke_color: Line color as hex string, e.g. "#000000".
+        stroke_width: Line width in internal pixels, e.g. 1.
+    """
+    result = await _send_to_browser("ADD_LINE", {
+        "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+        "strokeColor": stroke_color,
+        "strokeWidth": stroke_width,
+    })
+    return json.dumps({"status": "success", "data": result})
+
+
+@mcp.tool()
 async def update_net_name(gid: str, net_name: str) -> str:
     """Update the net assignment of a pad or track element.
 
