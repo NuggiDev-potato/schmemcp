@@ -125,32 +125,40 @@ Draws a schematic wire between two points.
 - `x1, y1`: Start point coordinates (pixels)
 - `x2, y2`: End point coordinates (pixels)
 
-**Mechanism (verified working):** Wires are NOT created via `api("createShape", {shapeType: "wire"})` —
-that routes to the editor's interactive `drawShape` state machine and only leaves a `false` stub
-in the top-level `wire` container (nothing rendered). Real schematic wires live in the sheet/frame
-lib's `polyline` container: `src.schlib[<sheetLibGid>].polyline[<newGid>]`, where `<sheetLibGid>`
-is `src.itemOrder[0]` (e.g. `frame_lib_1`). Inject the wire object there and call `applySource`.
+**Mechanism (verified working, per official EasyEDA API docs):** Wires are created via
+`api("createShape", {shapeType: "wire", jsonCache: {...}})` **containing `pointArr`** (geometry array).
+This registers a real logical wire in the top-level `wire` container of the document and renders it
+on the canvas with `c_etype="wire"` inside a `<g class="shapeBox">` group — exactly like wires drawn
+interactively. Such wires ARE electrically connected to any pins whose endpoints they touch.
+
+CRITICAL differences from earlier (broken) attempts:
+
+- Passing `points` (instead of `pointArr`) inside `jsonCache` — or calling `createShape` without
+  `jsonCache` — routes to the interactive `drawShape` state machine and leaves a `false` stub in the
+  top-level `wire` container (nothing rendered). Only `jsonCache.pointArr` works.
+- Injecting into `src.schlib[<sheetLibGid>].polyline[...]` and calling `applySource` produces a
+  COSMETIC polyline (no `c_etype="wire"`): visually renders but is NOT logically connected. It also
+  risks dropping `frame_lib_1` from the document during an `applySource` round-trip.
 
 **Internal implementation (main.js `handleAddWire`):**
 ```javascript
-var src = api('getSource', { type: 'json', compress: false });
-var sheetGid = src.itemOrder[0]; // frame/sheet lib
-var gid = nextGid(src);           // max existing gge N + 1
-src.schlib[sheetGid].polyline[gid] = {
-  gId: gid,
-  strokeColor: '#880000',
-  strokeWidth: '1',
-  strokeStyle: 0,
-  fillColor: 'none',
-  locked: '0',
-  pointArr: [{ x: x1, y: y1 }, { x: x2, y: y2 }]
-};
-api('applySource', { source: src });
+var gid = nextGid(src); // max existing gge N + 1
+var ret = api('createShape', {
+  shapeType: 'wire',
+  jsonCache: {
+    gId: gid,
+    strokeColor: '#880000',
+    strokeWidth: '1',
+    strokeStyle: 0,
+    fillColor: 'none',
+    locked: '0',
+    pointArr: [{ x: x1, y: y1 }, { x: x2, y: y2 }]
+  }
+});
 ```
 
-The editor normalizes and repaints the frame's `polyline` container to `c_etype` polylines on the
-canvas; verified rendered in the live DOM (`<polyline points="400 -200 600 -200" stroke="#880000">`).
-The top-level `wire` container and `itemOrder` are NOT used for wires.
+Verified in the live editor: the resulting `<polyline c_etype="wire" c_shapetype="line" points="...">`
+is a proper net wire; endpoints snapped to pin endpoints are electrically connected.
 
 ### 5. `update_net_name(gid, net_name)`
 
