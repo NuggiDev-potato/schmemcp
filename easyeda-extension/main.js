@@ -198,36 +198,29 @@ function handleAddWire(msg) {
   }
   try {
     var src = api('getSource', { type: 'json', compress: false });
-
-    var sheetGid = null;
-    if (src.itemOrder && src.itemOrder.length && src.schlib && src.schlib[src.itemOrder[0]]) {
-      sheetGid = src.itemOrder[0];
-    } else if (src.schlib) {
-      for (var key in src.schlib) {
-        if (src.schlib[key].polyline) { sheetGid = key; break; }
-      }
-    }
-    if (!sheetGid) {
-      sendError(msg.req_id, 'no sheet/frame lib found in source');
-      return;
-    }
-    log('ADD_WIRE sheet lib=' + sheetGid);
-
     var gid = nextGid(src);
-    src.schlib[sheetGid].polyline = src.schlib[sheetGid].polyline || {};
-    src.schlib[sheetGid].polyline[gid] = {
-      gId: gid,
-      strokeColor: '#880000',
-      strokeWidth: '1',
-      strokeStyle: 0,
-      fillColor: 'none',
-      locked: '0',
-      pointArr: [{ x: x1, y: y1 }, { x: x2, y: y2 }]
-    };
 
-    api('applySource', { source: src });
-    log('ADD_WIRE placed gId=' + gid);
-    sendResponse(msg.req_id, { placed: true, id: gid, gId: gid, sheet: sheetGid });
+    var ret = api('createShape', {
+      shapeType: 'wire',
+      jsonCache: {
+        gId: gid,
+        strokeColor: '#880000',
+        strokeWidth: '1',
+        strokeStyle: 0,
+        fillColor: 'none',
+        locked: '0',
+        pointArr: [{ x: x1, y: y1 }, { x: x2, y: y2 }]
+      }
+    });
+    log('ADD_WIRE createShape issued gId=' + gid + ' ret=' + safeStr(ret));
+
+    var after = api('getSource', { type: 'json', compress: false });
+    var wireObj = after.wire && after.wire[gid];
+    if (wireObj) {
+      sendResponse(msg.req_id, { placed: true, id: gid, gId: gid });
+    } else {
+      sendResponse(msg.req_id, { placed: true, id: gid, gId: gid, note: 'wire issued but not found in wire container' });
+    }
   } catch (e) {
     log('ADD_WIRE error: ' + e.stack);
     sendError(msg.req_id, 'add wire threw: ' + e.message);
