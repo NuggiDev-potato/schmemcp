@@ -1,3 +1,6 @@
 # Virtual environments
 mcpservenv/
 mcpserverenv/
+
+# Python bytecode
+__pycache__/

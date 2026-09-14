@@ -22,7 +22,7 @@ def _generate_req_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
-async def _send_to_browser(action: str, args: Dict[str, Any]) -> Any:
+async def _send_to_browser(action: str, args: Dict[str, Any], timeout: float = 60.0) -> Any:
     if not _browser_connections:
         raise ConnectionError("EasyEDA browser tab not connected via WebSocket.")
 
@@ -43,7 +43,7 @@ async def _send_to_browser(action: str, args: Dict[str, Any]) -> Any:
     logger.info("Sent to browser: action=%s req_id=%s", action, req_id)
 
     try:
-        result = await asyncio.wait_for(future, timeout=60.0)
+        result = await asyncio.wait_for(future, timeout=timeout)
     except asyncio.TimeoutError:
         _pending_requests.pop(req_id, None)
         raise TimeoutError(f"Timed out waiting for browser response (req_id={req_id})")
@@ -195,6 +195,39 @@ def _lcsc_stock_price(lcsc_id: str) -> Optional[Dict[str, Any]]:
         "footprint": web.get("encapStandard"),
         "brand": web.get("brandNameEn"),
         "model": web.get("productModel"),
+    }
+
+
+def _lcsc_datasheet(lcsc_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch the datasheet link + metadata for one LCSC part from its product page.
+    Returns None when the part has no product page (404 / no webData)."""
+    import requests
+    resp = requests.get(
+        _LCSC_PRODUCT_URL.format(lcsc_id),
+        headers=_LCSC_HEADERS,
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        return None
+    m = _NEXT_DATA_RE.search(resp.text)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(1))
+    except (ValueError, TypeError):
+        return None
+    page_props = (data.get("props") or {}).get("pageProps") or {}
+    web = page_props.get("webData") or {}
+    url = (web.get("productDatasheetUrl") or web.get("pdfUrl")
+           or web.get("productDetailFileUrl") or web.get("manualUrl") or "").strip()
+    return {
+        "lcsc_id": lcsc_id,
+        "datasheet_url": url,
+        "product_url": _LCSC_PRODUCT_URL.format(lcsc_id),
+        "product_name": web.get("productNameEn"),
+        "brand": web.get("brandNameEn"),
+        "model": web.get("productModel"),
+        "stock": int(web.get("stockNumber") or 0),
     }
 
 
@@ -423,18 +456,21 @@ async def search_inductor(features: list, max_results: int = 5) -> str:
 
 
 @mcp.tool()
-async def add_wire(x1: float, y1: float, x2: float, y2: float) -> str:
-    """Draw a schematic wire between two points.
+async def search_datasheet(lcsc_id: str) -> str:
+    """Fetch the datasheet (PDF link + metadata) for an LCSC part number, e.g.
+    "C238060". Runs entirely in Python (no browser connection needed) by scraping the
+    part's LCSC product page. Returns the direct datasheet PDF URL plus product
+    name/brand/model/stock when the page exists.
 
     Args:
-        x1: Start X-coordinate in EasyEDA internal pixels (1 px = 10 mil = 0.254 mm).
-        y1: Start Y-coordinate.
-        x2: End X-coordinate.
-        y2: End Y-coordinate.
+        lcsc_id: LCSC part number, e.g. "C123302".
     """
-    result = await _send_to_browser("ADD_WIRE", {
-        "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-    })
+    result = await asyncio.to_thread(_lcsc_datasheet, lcsc_id)
+    if not result:
+        return json.dumps({
+            "status": "error",
+            "error": f"no product page / webData found for {lcsc_id}",
+        })
     return json.dumps({"status": "success", "data": result})
 
 
@@ -475,6 +511,57 @@ async def update_net_name(gid: str, net_name: str) -> str:
 
 
 @mcp.tool()
+async def move_component(gid: str, x: float, y: float) -> str:
+    """Move a component to an absolute position on the EasyEDA schematic canvas.
+
+    Args:
+        gid: Global ID of the shape to move (e.g. "gge5").
+        x: Target X-coordinate in EasyEDA internal pixels (1 px = 10 mil = 0.254 mm).
+        y: Target Y-coordinate in EasyEDA internal pixels.
+    """
+    result = await _send_to_browser("MOVE_OBJS_TO", {
+        "gids": [gid],
+        "x": x,
+        "y": y,
+    })
+    return json.dumps({"status": "success", "data": result})
+
+
+@mcp.tool()
+async def move_components(gids: list, dx: float = 0, dy: float = 0) -> str:
+    """Move one or more components by a relative offset on the schematic canvas.
+
+    Args:
+        gids: List of gIds to move (each a component id like "gge5").
+        dx: Relative X-offset in EasyEDA internal pixels (1 px = 10 mil = 0.254 mm).
+        dy: Relative Y-offset in EasyEDA internal pixels.
+    """
+    result = await _send_to_browser("MOVE_OBJS", {
+        "gids": gids,
+        "dx": dx,
+        "dy": dy,
+    })
+    return json.dumps({"status": "success", "data": result})
+
+
+@mcp.tool()
+async def move_component_to(gids: list, x: float, y: float) -> str:
+    """Move one or more shapes to an absolute canvas position.
+
+    Args:
+        gids: List of gIds to move (each a component id like "gge5").
+        x: Target X-coordinate in EasyEDA internal pixels (1 px = 10 mil = 0.254 mm).
+        y: Target Y-coordinate in EasyEDA internal pixels.
+    """
+    result = await _send_to_browser("MOVE_OBJS_TO", {
+        "gids": gids,
+        "x": x,
+        "y": y,
+    })
+    return json.dumps({"status": "success", "data": result})
+
+
+@mcp.tool()
 async def delete_component(gids: list) -> str:
     """Delete one or more shapes/components by their gIds.
 
@@ -486,36 +573,31 @@ async def delete_component(gids: list) -> str:
 
 
 @mcp.tool()
-async def move_component(gids: list, add_x: float = 0, add_y: float = 0) -> str:
-    """Move shapes in relative coordinates, like pressing the arrow keys.
+async def run_batch(operations: list) -> str:
+    """Execute a sequence of EasyEDA operations in order as a single batch.
+
+    Each operation is a dict: {"action": <action>, "args": {<args>}}.
+    Actions may be given as MCP tool names ("place_component", "add_line",
+    "update_net_name", "move_component", "move_components",
+    "move_component_to", "delete_component", "get_canvas_source",
+    "search_lcsc_component", "eval_browser_js") or raw bridge actions
+    ("PLACE_LCSC", "ADD_LINE", "UPDATE_NET_NAME",
+    "MOVE_OBJS_TO", "MOVE_OBJS", "DELETE", "GET_SOURCE", "SEARCH_LCSC", "EXEC_JS").
+
+    There is no add_wire tool/action: draw REAL wires with eval_browser_js via
+    the editor's importShape hook (c_etype="wire") as described in
+    AGENT_KNOWLEDGE_BASE.md section 4b.
+
+    Operations run sequentially inside the browser (waiting for each to
+    finish before starting the next). Returns one result per operation in
+    order: {"status": "success", "data": ...} or
+    {"status": "error", "error": "..."}. A whole batch is a single WebSocket
+    round-trip, so it is much faster than repeated individual tool calls.
 
     Args:
-        gids: List of gIds to move, e.g. ["gge2", "gge3"].
-        add_x: Relative X displacement in internal pixels (positive = right).
-        add_y: Relative Y displacement in internal pixels (positive = down).
+        operations: List of operation dicts to execute in order.
     """
-    result = await _send_to_browser("MOVE_OBJS", {
-        "gids": gids,
-        "addX": add_x,
-        "addY": add_y,
-    })
-    return json.dumps({"status": "success", "data": result})
-
-
-@mcp.tool()
-async def move_component_to(gids: list, x: float, y: float) -> str:
-    """Move shapes to an absolute canvas position (coordinates are relative to the origin).
-
-    Args:
-        gids: List of gIds to move, e.g. ["gge2", "gge3"].
-        x: Target X-coordinate in internal pixels.
-        y: Target Y-coordinate in internal pixels.
-    """
-    result = await _send_to_browser("MOVE_OBJS_TO", {
-        "gids": gids,
-        "x": x,
-        "y": y,
-    })
+    result = await _send_to_browser("BATCH", {"operations": operations}, timeout=300.0)
     return json.dumps({"status": "success", "data": result})
 
 

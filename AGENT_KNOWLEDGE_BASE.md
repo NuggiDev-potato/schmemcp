@@ -78,61 +78,25 @@ Retrieves the full active EasyEDA document schema.
 }
 ```
 
-### 2. Component Search Tools (Python-native)
+### 2. `search_lcsc_component(query)`
 
-All component search runs **entirely in Python** (`requests` → EasyEDA/LCSC HTTP APIs); NO
-browser/WebSocket connection is required. Whatever you can describe in free-form features,
-the tools translate into a ranked shortlist.
+Searches the LCSC/JLCPCB parts database. Does NOT require browser connection.
 
-Available tools:
+**Parameters:**
+- `query`: Search text, part number, or C-number (e.g., `"NE555"`, `"C12345"`)
 
-| Tool | Use for |
-|------|---------|
-| `search_lcsc_component(query)` | Generic keyword/C-number search |
-| `search_component(features)` | Any component described by free-form features |
-| `search_capacitor(features)` | Capacitors (auto-excludes Y5V/Z5U) |
-| `search_resistor(features)` | Resistors |
-| `search_diode(features)` | Diodes (incl. schottky, zener) |
-| `search_inductor(features)` | Inductors (power/SMD) |
-
-**Parameters (`features`):** a **list of feature strings** describing specs you care about,
-e.g. `["boost converter", "600 kHz"]`, `["I2C", "level shifter"]`, `["100nF", "0603", "X7R"]`,
-`["10k", "0402", "1%"]`, `["SS34", "schottky", "3A", "40V"]`. Every feature string must show up
-in the returned part's title/description/tags/value — parts that don't match ALL features are
-discarded (this removes "stray" unrelated results).
-
-**Result object:**
+**Returns:** JSON array of component objects:
 ```json
-{
-  "query": "boost converter 600kHz",
-  "attempted": true,
-  "max_price": 5.0,
-  "candidates": [{
-    "lcsc_id": "C123302",
-    "title": "TPS61021A ...",
-    "value": "3.3V",
-    "package": "SOT-23-5",
-    "manufacturer": "TI",
-    "mfr_part": "TPS61021ADSGR",
-    "stock": 12345,
-    "price": 0.412,
-    "over_budget": false,
-    "jlc_class": "Extended Part"
-  }]
-}
+[{
+  "lcsc_id": "C7593",
+  "mfr_part": "NE555DR",
+  "title": "Timer IC",
+  "package": "SOIC-8",
+  "stock": 322212,
+  "price": 0.091,
+  "description": "..."
+}]
 ```
-
-The tool already:
-- **Remove unavailable parts** (stock = 0 filtered out).
-- **Drop stray/unrelated results** that do not actually match the search type.
-- **Sort by price ascending** and return the **top 5** (`max_results` still honored).
-
-**Budget rule:** `over_budget: true` means the candidate is above the $5 budget. When the
-best match exceeds $5, ASK THE USER FOR THEIR OPINION before placing it.
-
-**Stop rule:** if a search returns no candidates and a retry with a different/better query
-also fails, STOP — do not keep guessing queries. Refine by asking the user for more specs
-or pick a different component type.
 
 ### 3. `place_component(title, x, y)`
 
@@ -153,48 +117,217 @@ api("createShape", {
 });
 ```
 
-### 4. `add_wire(x1, y1, x2, y2)`
+### 4. NO `add_wire` tool — draw wires ONLY via `eval_browser_js` (§4b)
 
-Draws a schematic wire between two points.
+There is deliberately **no `add_wire` / `ADD_WIRE`** tool, bridge action, or extension handler
+anymore. The browser-side `ADD_WIRE` path was unreliable (stale builds imported wires with
+`points="0 0 0 0"`), so it was deleted outright (bridge_server.py, easyeda-extension/main.js).
+**Do not look for or call an `add_wire` tool — it does not exist.**
 
-**Parameters:**
-- `x1, y1`: Start point coordinates (pixels)
-- `x2, y2`: End point coordinates (pixels)
+**Draw every wire with `easyeda-std_eval_browser_js`**, wrapping the editor's own importShape
+hook as shown in section 4b below. That method is byte-for-byte what `add_wire` used to do,
+and it is the ONLY supported way to create electrically-connected net wires.
 
-**Mechanism (verified working, per official EasyEDA API docs):** Wires are created via
-`api("createShape", {shapeType: "wire", jsonCache: {...}})` **containing `pointArr`** (geometry array).
-This registers a real logical wire in the top-level `wire` container of the document and renders it
-on the canvas with `c_etype="wire"` inside a `<g class="shapeBox">` group — exactly like wires drawn
-interactively. Such wires ARE electrically connected to any pins whose endpoints they touch.
+Fast bulk rail: ONE `eval_browser_js` call per rail (a polyline ip shows all its bends in a
+single inject), or `run_batch` of several `eval_browser_js` ops to draw the whole board's
+wires in one round-trip. Never chain dozens of two-point segments/steps when one polyline
+reaches all targets.
 
-CRITICAL differences from earlier (broken) attempts:
+> **SYMPTOM OF A STALE BROWSER BUILD (remember this):** the old extension `ADD_WIRE` handler
+> silently imported wires with `pointArr` all `(0,0)` (DOM `points="0 0 0 0"`) and assigned
+> fresh `ggeNNNN` ids (NOT free-form `gge_w...`). If `get_canvas_source`/`gJsonCache` ever
+> shows such zero-length wires plus a stray `junction` at `(0,0)`, delete them with
+> `w.callCommand.hooks.deleteObjs.call(w, [w.document.getElementById(id)])` and re-draw with
+> `eval_browser_js` importShape.
 
-- Passing `points` (instead of `pointArr`) inside `jsonCache` — or calling `createShape` without
-  `jsonCache` — routes to the interactive `drawShape` state machine and leaves a `false` stub in the
-  top-level `wire` container (nothing rendered). Only `jsonCache.pointArr` works.
-- Injecting into `src.schlib[<sheetLibGid>].polyline[...]` and calling `applySource` produces a
-  COSMETIC polyline (no `c_etype="wire"`): visually renders but is NOT logically connected. It also
-  risks dropping `frame_lib_1` from the document during an `applySource` round-trip.
+### 4b. Creating REAL Logic Wires — VERIFIED via `eval_browser_js` (THIS is the method — use this)
 
-**Internal implementation (main.js `handleAddWire`):**
+Wrap every wire operation in **one** `easyeda-std_eval_browser_js` call (the only supported way
+to make wires — see section 4).
+
 ```javascript
-var gid = nextGid(src); // max existing gge N + 1
-var ret = api('createShape', {
-  shapeType: 'wire',
-  jsonCache: {
-    gId: gid,
-    strokeColor: '#880000',
-    strokeWidth: '1',
-    strokeStyle: 0,
-    fillColor: 'none',
-    locked: '0',
-    pointArr: [{ x: x1, y: y1 }, { x: x2, y: y2 }]
-  }
+// Run via easyeda-std_eval_browser_js in iframe 0 (the schematic editor frame)
+(function(){
+  const w = document.querySelectorAll('iframe')[0].contentWindow;
+  const cc = w.callCommand;
+  const svg = '<polyline points="380,400 1020,400" stroke="#008800" stroke-width="1" fill="none" c_shapetype="line" c_etype="wire" id="gge_wire0001" locked="0"/>';
+  cc.hooks.importShape.call(w, svg, {});   // 2nd arg options {} is REQUIRED
+  const c = cc.hooks.gJsonCache.call(w);
+  return JSON.stringify({ json: c.wire && c.wire['gge_wire0001'], domPts: w.document.getElementById('gge_wire0001') && w.document.getElementById('gge_wire0001').getAttribute('points') });
+})();
+```
+
+**How the wiring API works:**
+
+1. `c_etype="wire"` on the `<polyline>` is what makes it a REAL wire. The editor maps
+   `polyline` + `c_etype="wire"` → command key `"wire"` (see `getSCHCmdKey` in
+   `editorSCH.min.js`), and its serializer then puts the object into the top-level
+   `"wire": { "gId": { gId, strokeColor, strokeWidth, strokeStyle, fillColor, locked, pointArr } }`
+   JSON section — NOT the `polyline` section. The interactive wire tool builds exactly this shape.
+2. Coordinates: use `points="x1,y1 x2,y2"` (comma between x and y, space between points).
+   **This preserved exact coords** in both the DOM and JSON (`pointArr`). A space-only string
+   (`"x1 y1 x2 y2"`) produced SHIFTED points in one test (380,400 740,420 → 375,400 735,415),
+   so keep the comma-x,y form.
+3. Typical attributes: `stroke="#008800"` (green — the editor's default schematic wire color),
+   `stroke-width="1"`, `fill="none"`, `c_shapetype="line"`, `locked="0"`.
+4. `importShape` hook signature is `importShape(svgString, options)` — the options object is
+   MANDATORY; omitting it throws `Cannot read properties of undefined (reading 'appendTo')`.
+
+**How to wire FAST (multi-point polyline — one call per net):**
+
+A single `<polyline>` may contain ANY number of `x,y` points. Build one polyline per rail/net —
+all its bends included — instead of chaining many tiny two-point segments. One `importShape`
+call = one whole rail:
+
+```javascript
+// + rail: battery + (1880,1195) → down → right → up through LED2+ → LED1+
+cc.hooks.importShape.call(w, '<polyline points="1880,1195 1880,1500 2166,1500 2166,1395 2166,1195" stroke="#008800" stroke-width="1" fill="none" c_shapetype="line" c_etype="wire" id="gge_wireP01" locked="0"/>', {});
+```
+
+For a whole board, run ALL wires in one eval script (loop over an array of wire defs):
+
+```javascript
+var defs = [
+  { id: 'gge_wireP01', pts: '1880,1195 1880,1500 2166,1500 2166,1395 2166,1195' },
+  { id: 'gge_wireM01', pts: '1916,1195 1916,1100 2126,1100 2126,1195 2126,1395' }
+];
+defs.forEach(function(d){
+  cc.hooks.importShape.call(w, '<polyline points="'+d.pts+'" stroke="#008800" stroke-width="1" fill="none" c_shapetype="line" c_etype="wire" id="'+d.id+'" locked="0"/>', {});
 });
 ```
 
-Verified in the live editor: the resulting `<polyline c_etype="wire" c_shapetype="line" points="...">`
-is a proper net wire; endpoints snapped to pin endpoints are electrically connected.
+Wire ids are free-form (`gge_wireP01`, ...) — you do NOT need real `gId`s. Gaps ≤ 50 px between
+bends look like a clean continuous rail.
+
+**What happens automatically:**
+
+- Where a wire runs THROUGH a pin coordinate, the editor auto-creates a junction object in the
+  top-level `"junction"` section (red dot). Wire endpoints that land exactly ON a pin need no
+  junction — connection is implied by shared coordinates.
+- The canvas will snap a wire to grid; endpoints should be placed ON the pin's exact `x,y`
+  (read back from `gJsonCache`: `schlib.<gid>.pin.<pinid>.configure.x/y`).
+
+**CRITICAL wiring rule — never let a rail run OVER another pin:**
+
+A rail segment passing across ANY pin coordinate joins that pin to the net (junction appears).
+This is a real electrical short / unintended connection. Example: battery(+) rail run straight
+along y=1460 to switch pin 2 passed over switch pin 1 and silently shorted pin1+pin2 together,
+bypassing the switch entirely. **Always route rails so they only touch the intended pins** —
+approach each target pin from below/above/side on its own column, never straddling a neighbor:
+
+- Battery side wire ends on switch THROW pin (e.g. (1976,1460)).
+- LED-side wire starts on switch COMMON/POLE pin (e.g. (1996,1460)), drops below the switch to
+  y=1500, runs right, then rises up the LED + column — pin 3 stays floating with no junction.
+
+After wiring, verify junctions: read `gJsonCache.junction` — the set of junction coords must
+exactly match the intended tap points (no extras on pins you meant to leave open).
+
+**How to delete/replace a wire:**
+
+1. `cc.hooks.deleteObjs.call(w, [w.document.getElementById('gge_wire0001')])` — needs the REAL DOM
+   node, not an id string (an id string throws `appendChild: parameter 1 is not of type Node`).
+2. Deleting a wire removes its auto-created junctions from the cache; re-import the corrected
+   wire, then re-verify junctions.
+3. If the DOM node was already removed but the wire lingers in the JSON cache (orphan), re-create
+   the node via `importShape` with the same id, then call `deleteObjs` with the fresh node.
+
+**DANGER — never call `jsonMgr_calAll` / `updateJsonCache` / `drawShape` hooks.** Calling these
+after manually mutating `gJsonCache` regenerated the whole document from the editor's stale
+stored sheet — old/abandoned components came back and the placed parts were wiped from live
+cache + DOM. Only use `importShape`, `deleteObjs`, and `gJsonCache` (read) directly.
+
+**Other notes:**
+- `window.api()` is NOT reachable from `eval_browser_js` (undefined in both the frame and parent);
+  unregistered commands like `moveObjsTo` silently return `undefined` and do nothing. The
+  extension manager lives at `parent.top.easyeda.extension` (has `instances` incl. `mcpbridge`,
+  plus `exec`/`quickScript`/`doCommand`). Editor commands are exposed as `callCommand.hooks.*`:
+  `gJsonCache` (get doc), `getSource`, `getShape`, `deleteObjs`, `move`, `setOriginXY`,
+  `undo`/`redo`. There is NO `moveObjsTo` hook — lay out components by placing them at final
+  coordinates instead of moving later.
+- `place_component` drifts ~+396 px X / +295 px Y from the requested coords and its returned gId
+  is unreliable. Always read back real gIds + pin coords via `gJsonCache` before wiring.
+
+### 4c. Wiring a Board End-to-End (the proven workflow)
+
+Verified end-to-end in a real schematic (CR2032 bed lamp). Follow this order — it never
+short-circuits and is fast:
+
+1. **Place ALL components first.** `place_component` drifts ~+396/+295 px from the requested
+   coord, so plan placement ~ (target − 396, target − 295). The returned gId in the MCP reply is
+   unreliable (repeat placements can echo a wrong id) — ignore it.
+2. **Read back real geometry** with ONE `gJsonCache` probe. Every component's pins are in
+   `schlib.<gid>.pin.<pinid>.configure.x/y` (+ `rotation`, `spicePin`). Collect head coords,
+   pin coords and pin labels (+/−/1/2/3) for all parts. Use these numbers for wiring — not the
+   requested place coords.
+3. **Plan rails as orthogonal polylines.** Decide, per net, an axis-aligned path that only
+   passes through the intended pin coordinates. Keep + and − rails on separate rows/columns so
+   they never cross. For a switch, its pins lie on a row — reach the target pin from its own
+   column and never straddle a neighbour pin.
+4. **Wire each rail with ONE `eval_browser_js` call** — `cc.hooks.importShape` with a single
+   `c_etype="wire"` polyline (see §4b). Wire endpoints land ON a pin
+   → connected by shared coords; a wire passing THROUGH a pin → the editor auto-creates a
+   junction dot. That is correct and intended.
+5. **Verify junctions.** Read `gJsonCache.junction` — junction coords must EXACTLY equal your
+   intended tap points and nothing else. A junction on a pin you meant to leave floating means a
+   short (see the switch trap in §4b). Verify `schlib` still contains every placed part and the
+   `wire` section holds every rail.
+6. **Fix a mistake** by deleting the offending wire (`deleteObjs` with the real DOM node — it
+   removes its junctions too), re-importing the corrected polyline, and re-running step 5. Do
+   NOT call `jsonMgr_calAll` / `updateJsonCache` / `drawShape` (§4b DANGER).
+
+**Worked reference — CR2032 bed lamp (4 parts, 3 wires).** Layout produced by placing at
+(1500,900), (1750,900), (1750,1100), (1600,1140) and reading back:
+
+| Ref | Part (LCSC) | gId | Head | Pins |
+|-----|-------------|-----|------|------|
+| BT1 | Keystone 1025 (C238060) | gge11483 | (1896,1200) | `+`(1876,1200) `−`(1916,1200) |
+| SW1 | SPDT slide 12D18G4 (C49023767) | gge11632 | (1996,1440) | pin1(1976,1460) pin2/com(1996,1460) pin3(2016,1460) |
+| LED1 | LED0805 white (C110099) | gge11405 | (2146,1195) | `−`(2126,1195) `+`(2166,1195) |
+| LED2 | LED0805 white (C110099) | gge11552 | (2146,1395) | `−`(2126,1395) `+`(2166,1395) |
+
+Three rail polylines (this is the whole circuit — each is one `eval_browser_js` importShape call):
+
+```javascript
+// BT+ -> switch throw pin1  (one rail, lands only on pin1)
+cc.hooks.importShape.call(w, '<polyline points="1876,1200 1876,1460 1976,1460" stroke="#008800" stroke-width="1" fill="none" c_shapetype="line" c_etype="wire" id="gge_wA01" locked="0"/>', {});
+// switch common pin2 -> LED1+/LED2+ (+ rail, routed BELOW the switch so pin3 stays open)
+cc.hooks.importShape.call(w, '<polyline points="1996,1460 1996,1500 2166,1500 2166,1395 2166,1195" stroke="#008800" stroke-width="1" fill="none" c_shapetype="line" c_etype="wire" id="gge_wB01" locked="0"/>', {});
+// BT- -> LED1-/LED2- (- rail)
+cc.hooks.importShape.call(w, '<polyline points="1916,1200 1916,1100 2126,1100 2126,1195 2126,1395" stroke="#008800" stroke-width="1" fill="none" c_shapetype="line" c_etype="wire" id="gge_wC01" locked="0"/>', {});
+```
+
+Resulting junctions — the ONLY 2: (2126,1195) [LED1−] and (2166,1395) [LED2+, a pass-through on
+the + rail]. Nothing on SW pin1/pin2/pin3 (1976/1996/2016,1460) — the switch throws and common
+stay clean, so the SPDT genuinely opens/closes the lamp. If any switch pin shows a junction, a
+rail is straddling it and shorting both throws to the LED rail.
+
+**Same circuit, SMD parts (also verified 2026-09, built this way in §4c).** Placing C7498149 at
+(1580,900), C49023767 at (1600,1140), C25170729 ×2 at (1750,900)/(1750,1100) landed the parts
+~+396/+295 px later and matched the row layout exactly:
+
+| Ref | Part (LCSC) | gId | Head | Pins |
+|-----|-------------|-----|------|------|
+| BT1 | CR2032 SMD holder BS-CR2032-8 (C7498149) | gge11740 | (1947,1173) | pin1/`−`(1927,1173) pin2/`+`(1967,1173) |
+| SW1 | SPDT slide MST-12D18G4 (C49023767) | gge11809 | (1996,1440) | pin1(1976,1460) pin2/com(1996,1460) pin3(2016,1460) |
+| LED1 | White 0805 YLED0805W (C25170729) | gge11905 | (2146,1190) | `−`/K(2126,1190) `+`/A(2166,1190) |
+| LED2 | White 0805 YLED0805W (C25170729) | gge11989 | (2146,1390) | `−`/K(2126,1390) `+`/A(2166,1390) |
+
+Battery polarity: the LCSC SMD holder symbol has NO `+` label — derive it from the battery
+symbol plates (long plate line = `+`). BS-CR2032-8 draws short/long/short/long plates left to
+right; pin1 connects to the short (negative) side and pin2 to the long (positive) side, so
+pin2 = `+` here (opposite of the Keystone TH holder above). Verify per part, never assume.
+
+Rails (identical routing, LED y is 5 px higher than the TH variant — each is one
+`eval_browser_js` importShape call):
+
+```javascript
+cc.hooks.importShape.call(w, '<polyline points="1967,1173 1967,1460 1976,1460" stroke="#008800" stroke-width="1" fill="none" c_shapetype="line" c_etype="wire" id="gge_wA01" locked="0"/>', {});
+cc.hooks.importShape.call(w, '<polyline points="1996,1460 1996,1500 2166,1500 2166,1390 2166,1190" stroke="#008800" stroke-width="1" fill="none" c_shapetype="line" c_etype="wire" id="gge_wB01" locked="0"/>', {});
+cc.hooks.importShape.call(w, '<polyline points="1927,1173 1927,1100 2126,1100 2126,1190 2126,1390" stroke="#008800" stroke-width="1" fill="none" c_shapetype="line" c_etype="wire" id="gge_wC01" locked="0"/>', {});
+```
+
+Junctions — only 2: (2166,1390) [LED2 A pass-through on the + rail] and (2126,1190) [LED1 K tap
+on the − rail]. Nothing on the switch pins.
 
 ### 5. `update_net_name(gid, net_name)`
 
@@ -211,6 +344,91 @@ api("updateShape", {
   jsonCache: { gId: gid, net: net_name }
 });
 ```
+
+### 6. `run_batch(operations)`
+
+Executes a list of operations **in order** with a single round-trip. Operations run
+sequentially inside the browser — each one waits for completion before the next starts.
+Use this for multi-step designs (place components, then wire them, then rename nets)
+instead of issuing many individual tool calls.
+
+**Parameters:**
+- `operations`: JSON array of operation objects, each `{"action": "...", "args": {...}}`.
+  `action` accepts either the MCP tool name (`place_component`, `add_line`,
+  `update_net_name`, `move_component`, `move_components`, `get_canvas_source`,
+  `search_lcsc_component`, `eval_browser_js`) or the raw bridge action (`PLACE_LCSC`,
+  `ADD_LINE`, `UPDATE_NET_NAME`, `MOVE_OBJS_TO`, `MOVE_OBJS`, `GET_SOURCE`,
+  `SEARCH_LCSC`, `EXEC_JS`). `args` holds that operation's parameters (using the MCP
+  tool parameter names). **There is no `add_wire`/`ADD_WIRE`** — to draw wires put an
+  `eval_browser_js` (EXEC_JS) operation in the batch with the §4b importShape script.
+
+**Returns:** Array of per-operation results in the **same order** as the input
+operations:
+```json
+{
+  "results": [
+    { "status": "success", "data": { "placed": true, "id": "gge5", "gId": "gge5" } },
+    { "status": "success", "data": { "placed": true, "id": "gge6", "gId": "gge6" } },
+    { "status": "error", "error": "missing gid or net_name" }
+  ]
+}
+```
+
+If one operation fails, the remaining operations still execute (no rollback). Large
+async operations (component placement, LCSC search, `eval_browser_js` promises) keep
+their own per-op completion; the result slot for that operation is written exactly when
+that operation settles, so results never shift order. Responses that arrive after an
+operation already timed out are dropped and never leak into the batch reply.
+
+Each operation has a 30 s safety timeout; a hung operation is recorded as an error and
+the batch continues.
+
+**Example:**
+```json
+{
+  "operations": [
+    { "action": "place_component", "args": { "lcsc_id": "C123302", "x": 200, "y": 200 } },
+    { "action": "place_component", "args": { "lcsc_id": "C123302", "x": 500, "y": 200 } },
+    { "action": "eval_browser_js", "args": { "code": "(function(){var w=document.querySelectorAll('iframe')[0].contentWindow;cc=w.callCommand;cc.hooks.importShape.call(w, '<polyline points=\"250,200 450,200\" stroke=\"#008800\" stroke-width=\"1\" fill=\"none\" c_shapetype=\"line\" c_etype=\"wire\" id=\"gge_wBATCH_1\" locked=\"0\"/>', {});return cc.hooks.gJsonCache.call(w).wire && Object.keys(cc.hooks.gJsonCache.call(w).wire).pop();})()" } },
+    { "action": "update_net_name", "args": { "gid": "gge5", "net_name": "VCC" } }
+  ]
+}
+```
+
+### 7. `move_component(gid, x, y)` / `move_components(gids, dx, dy)` / `move_component_to(gids, x, y)` / `delete_component(gids)`
+
+Moves one or more components on the schematic/PCB canvas.
+
+**`move_component(gid, x, y)`** — absolute move of a single component to canvas
+position `(x, y)`.
+- `gid`: Global ID of the shape (e.g. `"gge5"`).
+- `x, y`: Target coordinates in internal pixels (1 px = 10 mil = 0.254 mm), absolute to
+  the canvas origin (top-left of the editor).
+
+**`move_components(gids, dx, dy)`** — relative move of one or more components by an
+offset.
+- `gids`: Array of gIds to move together.
+- `dx, dy`: Offsets in internal pixels (positive = right/down).
+
+**`move_component_to(gids, x, y)`** — absolute move of one or more shapes.
+
+**`delete_component(gids)`** — deletes one or more shapes/components by gId
+(`api('delete', { ids: gids })`).
+
+**Internal API calls:**
+```javascript
+// Absolute (single or multiple shapes), native api('moveObjsTo')
+api('moveObjsTo', { objs: [{ gId: 'gge5' }], x: 200, y: 200 });
+
+// Relative (one or more shapes), native api('moveObjs')
+api('moveObjs', { objs: [{ gId: 'gge5' }, { gId: 'gge6' }], addX: 20, addY: -10 });
+
+// Delete
+api('delete', { ids: ['gge2', 'gge3'] });
+```
+
+Coordinates are always canvas pixels, NOT the schematic origin cross — read
+`get_canvas_source` first if you need the current shape position before moving.
 
 ---
 
@@ -247,6 +465,8 @@ All operations below are executed via `window.api(commandName, argsObject)` thro
 | `api("rotate", {ids:["gge1"], degree:90})` | Rotate clockwise |
 | `api("fliph", {ids:["gge1"]})` | Flip horizontal |
 | `api("flipv", {ids:["gge1"]})` | Flip vertical |
+| `api("moveObjs", {objs:[{gId:"gge1"}], addX:20, addY:20})` | Move shapes by relative offset (array of `{gId}` or plain gId strings) |
+| `api("moveObjsTo", {objs:[{gId:"gge1"}], x:200, y:200})` | Move shapes to absolute canvas position |
 | `api("align_left", {ids:["gge1","gge2"]})` | Align left edges |
 
 ### Supported shapeType Values
@@ -320,9 +540,12 @@ api("createShape", {
 ### 3. Connect Components with Wires
 
 ```
-1. Get canvas source to find pin locations
-2. Call add_wire(x1, y1, x2, y2) between pin endpoints
-3. Each wire segment is one call; chain calls for paths
+1. Place all components first, then get canvas source / gJsonCache to find
+   the EXACT pin coordinates (schlib.<gid>.pin.<pinid>.configure.x/y)
+2. Wire with `easyeda-std_eval_browser_js` + `cc.hooks.importShape` (see section 4 / 4b),
+   calling it once per rail polyline, or batch several as EXEC_JS ops.
+3. Verify junctions in the gJsonCache "junction" section match the intended
+   tap points, and that no unintended pin got shorted into a rail.
 ```
 
 ### 4. Rename Nets
@@ -390,47 +613,19 @@ Messages between Python server and browser extension use JSON-RPC style frames:
 
 ---
 
-## Component Selection Guidance
+## LCSC Component Data Fields
 
-Rules an agent MUST follow when choosing parts:
+When using `search_lcsc_component()`, results contain:
 
-1. **More than one candidate with equal/close price+stock → ASK the user** which one they
-   prefer before finalizing. Do not silently pick between equal ties.
-2. **Over-budget pick (> $5)** → surface the price to the user and ask if it is acceptable.
-3. **Cannot find a match** → after **2 failed search calls** (with different/good queries),
-   STOP. Ask the user for clarification rather than guessing further.
-4. Never place a part that is out of stock (the tools already filter these, but double-check
-   the `stock` field).
-5. Prefer parts with higher stock when candidates are otherwise equivalent — fewer supply risks.
-
-### Dielectrics (SMD ceramic capacitors)
-
-- **Y5V and Z5U — NOT recommended.** They lose most of their capacitance under DC bias and with
-  temperature (up to −80%/+30% from −30°C to +85°C, and up to −50% at rated DC voltage), which
-  kills decoupling/filtering behavior. `search_capacitor()` automatically excludes them.
-- **Preferred dielectrics:** C0G/NP0 (stable, low loss, for precision/timing), X7R, X5R, X6S
-  (good density + stability trade-off for decoupling).
-- If in doubt for power/decoupling: X7R/X5R.
-
-### Footprint pros/cons
-
-| Package | Good | Bad |
-|---------|------|-----|
-| 0402 | tiny, high density, cheap | hard to hand-solder, low power/voltage rating |
-| 0603 | good density + easy to handle | none major — default choice for passives |
-| 0805 | easier to hand-solder, more power | larger, fewer fit on a board |
-| 1206 | high power/voltage, easiest hand-solder | large footprint |
-| SOT-23-3/5/6 | tiny, common for small ICs/transistors | harder to hand-solder, low power |
-| SOIC-8 (150mil) | easy to solder, standard | larger than QFN/SOIC-8EP for power |
-| SOIC-8-EP / SOP-8-PP | better thermal payout for power ICs | exposed pad needs correct pad in layout |
-| QFN-xx | small, good thermal/electrical | hard to hand-solder, pad under package |
-| SOT-223 | higher power than SOT-23, easy solder | bulkier |
-| DPAK/TO-252 | good thermal path for regulators/diodes | big for small signals |
-| Through-hole (DIP) | breadboard/prototype friendly, easy solder | large, not for production density |
-| 1210 / 2010 / 2512 | power resistors/caps, high current | large |
-
-For a given value, prefer the smallest package whose power/voltage rating fits — and prefer the
-one with both good stock and low price (the search tools already rank this way).
+| Field | Description |
+|-------|-------------|
+| `lcsc_id` | LCSC code (e.g., "C7593") |
+| `mfr_part` | Manufacturer part number |
+| `title` | Component title/description |
+| `package` | Footprint/package (e.g., "SOIC-8") |
+| `stock` | Current stock quantity |
+| `price` | Unit price (USD) |
+| `description` | Full description |
 
 ---
 
